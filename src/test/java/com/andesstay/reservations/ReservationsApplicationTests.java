@@ -33,6 +33,9 @@ class ReservationsApplicationTests {
     @MockBean
     private ConnectionFactory connectionFactory;
 
+    @MockBean
+    private org.springframework.kafka.core.KafkaTemplate<String, Object> kafkaTemplate;
+
     @Test
     void testGetAllReservations() throws Exception {
         mockMvc.perform(get("/api/reservations"))
@@ -79,5 +82,16 @@ class ReservationsApplicationTests {
 
         Mockito.verify(rabbitTemplate, Mockito.atLeastOnce())
                 .convertAndSend(eq(RabbitConfig.EXCHANGE_DIRECT), eq(RabbitConfig.ROUTING_KEY_EMAIL_SEND), any(Object.class));
+    }
+
+    @Test
+    void testSimulateKafkaStreamEndpoint() throws Exception {
+        mockMvc.perform(post("/api/reservations/kafka/simulate-stream?eventType=STREAM_UNIT_TEST"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"))
+                .andExpect(jsonPath("$.eventType").value("STREAM_UNIT_TEST"));
+
+        Mockito.verify(kafkaTemplate, Mockito.atLeastOnce())
+                .send(eq(com.andesstay.reservations.config.KafkaProducerConfig.TOPIC_RESERVATIONS_STREAM), any(), any());
     }
 }

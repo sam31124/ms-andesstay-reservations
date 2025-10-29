@@ -22,11 +22,14 @@ public class ReservationController {
 
     private final ReservationRepository reservationRepository;
     private final ReservationEventPublisher reservationEventPublisher;
+    private final com.andesstay.reservations.service.KafkaReservationStreamProducer kafkaStreamProducer;
 
     public ReservationController(ReservationRepository reservationRepository,
-                                 ReservationEventPublisher reservationEventPublisher) {
+                                 ReservationEventPublisher reservationEventPublisher,
+                                 com.andesstay.reservations.service.KafkaReservationStreamProducer kafkaStreamProducer) {
         this.reservationRepository = reservationRepository;
         this.reservationEventPublisher = reservationEventPublisher;
+        this.kafkaStreamProducer = kafkaStreamProducer;
     }
 
     @GetMapping
@@ -72,11 +75,20 @@ public class ReservationController {
             log.warn("[RabbitMQ Warning] No se pudo publicar evento asíncrono: {}", e.getMessage());
         }
 
+        // Streaming en tiempo real con Apache Kafka (AndesStay EP5)
+        try {
+            kafkaStreamProducer.publishReservationEvent(savedReservation, "RESERVATION_CREATED");
+            kafkaStreamProducer.publishTelemetryMetric(savedReservation.getUnidad(), 82.5, 1);
+        } catch (Exception e) {
+            log.warn("[Kafka Warning] No se pudo emitir evento de streaming a Kafka: {}", e.getMessage());
+        }
+
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
-            "message", "Reserva creada con éxito y tareas asíncronas despachadas a RabbitMQ",
+            "message", "Reserva creada con éxito, tareas asíncronas despachadas a RabbitMQ y streaming emitido a Kafka",
             "data", savedReservation,
             "asyncDispatched", true,
-            "queuesNotified", List.of("q.cmd.email", "q.cmd.housekeeping", "q.cmd.voucher")
+            "queuesNotified", List.of("q.cmd.email", "q.cmd.housekeeping", "q.cmd.voucher"),
+            "kafkaTopicsNotified", List.of("andesstay.reservations.stream", "andesstay.analytics.telemetry")
         ));
     }
 
@@ -104,11 +116,18 @@ public class ReservationController {
             reserva.setEstado(newStatus.toUpperCase().trim());
             reservationRepository.save(reserva);
 
-            // Publicación asíncrona de cambio de estado
+            // Publicación asíncrona de cambio de estado (RabbitMQ)
             try {
                 reservationEventPublisher.publishReservationStatusUpdated(reserva, oldStatus, simulateError);
             } catch (Exception e) {
                 log.warn("[RabbitMQ Warning] No se pudo publicar cambio de estado: {}", e.getMessage());
+            }
+
+            // Streaming de actualización a Kafka (AndesStay EP5)
+            try {
+                kafkaStreamProducer.publishReservationEvent(reserva, "RESERVATION_STATUS_UPDATED");
+            } catch (Exception e) {
+                log.warn("[Kafka Warning] No se pudo emitir evento a Kafka: {}", e.getMessage());
             }
 
             return ResponseEntity.ok(Map.of(
@@ -116,9 +135,38 @@ public class ReservationController {
                 "data", reserva,
                 "oldStatus", oldStatus,
                 "newStatus", reserva.getEstado(),
-                "asyncDispatched", true
+                "asyncDispatched", true,
+                "kafkaStreamEvent", "RESERVATION_STATUS_UPDATED"
             ));
         }).orElse(ResponseEntity.notFound().build());
+    }
+
+    @PostMapping("/kafka/simulate-stream")
+    public ResponseEntity<?> simulateKafkaStream(
+            @RequestParam(defaultValue = "RESERVATION_STREAM_TEST") String eventType,
+            @RequestParam(defaultValue = "Cabaña Vista Volcán") String unitName) {
+        try {
+            Reservation dummy = new Reservation();
+            dummy.setId(999L);
+            dummy.setHuesped("Stream Test Guest");
+            dummy.setUnidad(unitName);
+            dummy.setEstado("CONFIRMADA");
+
+            kafkaStreamProducer.publishReservationEvent(dummy, eventType);
+            kafkaStreamProducer.publishTelemetryMetric(unitName, 91.0, 5);
+
+            return ResponseEntity.ok(Map.of(
+                "status", "SUCCESS",
+                "message", "Evento de streaming y métricas emitidos a Kafka con éxito",
+                "topics", List.of("andesstay.reservations.stream", "andesstay.analytics.telemetry"),
+                "eventType", eventType,
+                "unitName", unitName
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
+                "error", "Fallo al emitir evento a Kafka: " + e.getMessage()
+            ));
+        }
     }
 
     @PostMapping("/simulate-dlq")
